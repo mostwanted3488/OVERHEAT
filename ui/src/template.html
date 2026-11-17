@@ -238,10 +238,12 @@ if(JB)document.body.classList.add('host');
 function send(id,obj){if(JB)try{JB.emitEvent(id,obj)}catch(e){}}
 const sent={heat:null,mode:null,mix:null,autogain:null,bypass:null};
 let inited=false;
-function pushParam(id,val){if(!JB||!inited)return;if(sent[id]===val)return;sent[id]=val;send('set',{id,value:typeof val==='boolean'?(val?1:0):val});}
+const localT={};
+function pushParam(id,val){if(!JB||!inited)return;if(sent[id]===val)return;sent[id]=val;localT[id]=performance.now();send('set',{id,value:typeof val==='boolean'?(val?1:0):val});}
+const fresh=id=>performance.now()-(localT[id]||-1e9)<400;
 function gesture(id,start){send('gesture',{id,start});}
 const MODE_KEYS=['THERMAL','TUBE','TAPE','FUZZ','GRIT'];
-let hostSpec=null,hostSpecNew=false;
+let hostSpec=null,hostSpecNew=false,hostSpecBass=false;
 function fit(){const s=JB?Math.min(innerWidth/960,innerHeight/550):Math.min(innerWidth/980,innerHeight/604,1.4);plug.style.setProperty('--sc',`scale(${s})`);plug.style.transform=`scale(${s})`;}
 addEventListener('resize',fit);fit();
 
@@ -284,7 +286,7 @@ $('#mix').oninput=e=>{mix=e.target.value/100;pushParam('mix',+e.target.value);$(
 const STAT=[[.2,'COLD','#7fb7c9'],[.45,'WARM','#ffb347'],[.7,'HOT','#ff7a1a'],[.995,'CRITICAL','#ff3b1f'],[2,'OVERHEATED','#ffffff']];
 let wasMax=false;
 function setHeat(v){
-  heat=Math.max(0,Math.min(1,v));
+  heat=Math.max(0,Math.min(1,v));if(heat>.9995)heat=1;if(heat<.0005)heat=0;
   pushParam('heat',Math.round(heat*10000)/100);
   const p=Math.round(heat*100);
   $('#pct').innerHTML=String(p).replace(/0/g,'O')+'<small>%</small>';
@@ -311,7 +313,7 @@ function fire(){
 }
 function overheat(){
   fire();
-  clearTimeout(banT);banT=setTimeout(()=>{if(heat<1)return;$('#oh').classList.add('show');
+  clearTimeout(banT);banT=setTimeout(()=>{if(heat<.995)return;$('#oh').classList.add('show');
     const m=$('#medal');m.classList.remove('show');void m.offsetWidth;m.classList.add('show');},230);
 }
 
@@ -337,6 +339,7 @@ const MODES={
 };
 let mode='THERMAL';
 function shape(x,h){return MODES[mode].f(x,h);}
+function refGain(h){const c=makeCurve(h,4097);let a=0,b=0;for(let k=0;k<64;k++){const v=.35*Math.sin(2*Math.PI*(k+.5)/64);const p=(v+1)/2*4096,i=Math.min(4095,p|0),f=p-i,y=c[i]+(c[i+1]-c[i])*f;a+=v*v;b+=y*y;}return Math.max(.25,Math.sqrt(b/a));}
 function makeCurve(h,n=4096){const c=new Float32Array(n);let mx=1e-6;for(let i=0;i<n;i++){const x=i/(n-1)*2-1;c[i]=shape(x,h);mx=Math.max(mx,Math.abs(c[i]));}
   // remove DC offset of the curve so silence stays silent (no rumble/hiss floor)
   const z=c[(n-1)/2|0];for(let i=0;i<n;i++)c[i]=(c[i]-z)/(mx+Math.abs(z));return c;}
@@ -391,7 +394,7 @@ function applyAudio(){
   N.pre.gain.setTargetAtTime(h*M.pre,t,.03);
   N.mid.gain.setTargetAtTime(h*M.mid,t,.03);
   N.lp.frequency.setTargetAtTime(19000-h*h*M.lp,t,.03);
-  const comp=M.gain/(1+h*.35);
+  const comp=M.gain/refGain(h);
   N.wet.gain.setTargetAtTime(bypass?0:mix*(autoGain?1:comp),t,.02);
   if(!autoGain)N.ag.gain.setTargetAtTime(1,t,.05);
   N.dry.gain.setTargetAtTime(bypass?1:(1-mix),t,.02);
@@ -487,6 +490,7 @@ function drawSpec(){
 
 /* ---------- the gun ---------- */
 const img=new Image();img.src=IMG_SRC;
+const FILTER_OK=(()=>{try{const x=document.createElement('canvas').getContext('2d');return 'filter' in x&&!window.__NOFILTER;}catch(e){return false}})();
 const sil=document.createElement('canvas'),frost=document.createElement('canvas');sil.width=frost.width=512;sil.height=frost.height=256;
 function bakeCold(){const a=sil.getContext('2d');a.drawImage(img,0,0);a.globalCompositeOperation='source-in';a.fillStyle='#5ec6ff';a.fillRect(0,0,512,256);
   const f=frost.getContext('2d');const d=f.createImageData(512,256);
@@ -536,13 +540,16 @@ function drawGun(t){
   const by=Math.sin(t*.0012)*2;
   // icy glow when cold
   const cold=Math.max(0,1-shown/.35);
-  if(cold>0){gc.save();gc.filter='blur(12px)';gc.globalAlpha=cold*.22;gc.globalCompositeOperation='lighter';gc.drawImage(sil,0,0,512,256,0,by,512*S,256*S);gc.restore();}
+  if(!FILTER_OK){ // older macOS WebKit has no canvas filter: same glow via CSS drop-shadows on the canvas
+    const acc=ACC[curMode],ga=Math.min(1,shown*1.1*(1+pulse*.7));
+    g.style.filter=`drop-shadow(0 0 1.5px rgba(255,255,255,${(.35+pulse*.25).toFixed(2)}))`+(shown>.02?` drop-shadow(0 0 ${(6+shown*12).toFixed(1)}px rgba(${acc},${(ga*.85).toFixed(2)}))`:'')+(cold>0?` drop-shadow(0 0 10px rgba(94,198,255,${(cold*.45).toFixed(2)}))`:'');}
+  if(FILTER_OK&&cold>0){gc.save();gc.filter='blur(12px)';gc.globalAlpha=cold*.22;gc.globalCompositeOperation='lighter';gc.drawImage(sil,0,0,512,256,0,by,512*S,256*S);gc.restore();}
   // glow underlay
-  if(shown>.02){gc.save();gc.filter=`blur(${8+shown*14}px)`;gc.globalAlpha=Math.min(1,shown*1.1*(1+pulse*.7));gc.globalCompositeOperation='lighter';
+  if(FILTER_OK&&shown>.02){gc.save();gc.filter=`blur(${8+shown*14}px)`;gc.globalAlpha=Math.min(1,shown*1.1*(1+pulse*.7));gc.globalCompositeOperation='lighter';
     gc.drawImage(off,0,0,512,256,0,by,512*S,256*S);gc.restore();}
   // rim light (white outline like the DSR preview)
-  gc.save();gc.filter='blur(1.5px) brightness(0) invert(1)';gc.globalAlpha=.35+pulse*.25;
-  gc.drawImage(img,0,0,512,256,0,by,512*S,256*S);gc.restore();
+  if(FILTER_OK){gc.save();gc.filter='blur(1.5px) brightness(0) invert(1)';gc.globalAlpha=.35+pulse*.25;
+  gc.drawImage(img,0,0,512,256,0,by,512*S,256*S);gc.restore();}
   // body with shimmer slices
   if(amp<.05){gc.drawImage(off,0,0,512,256,0,by,512*S,256*S);}
   else{
@@ -611,16 +618,18 @@ function drawShot(dt,toFx){
 /* ---------- loop ---------- */
 let tb=null,bassEnv=0,bassAvg=0,beatT=-1e9,beatAmp=0,pulse=0;
 function rms(an){if(!tb||tb.length!==an.fftSize)tb=new Float32Array(an.fftSize);an.getFloatTimeDomainData(tb);let a=0;for(let i=0;i<tb.length;i++)a+=tb[i]*tb[i];return Math.sqrt(a/tb.length);}
-function bassDetect(e){const now=performance.now();bassEnv=e;bassAvg+=(e-bassAvg)*.04;
-  if(e>.3&&e>bassAvg*1.18&&now-beatT>140){beatT=now;beatAmp=Math.min(1,(e-bassAvg)*4+.35);}}
+// e = linear bass magnitude; a hit = clearly above its recent average
+function bassDetect(e){const now=performance.now();bassEnv=e;bassAvg+=(e-bassAvg)*.05;
+  if(e>.002&&e>bassAvg*1.3&&now-beatT>140){beatT=now;beatAmp=Math.min(1,.35+(e/bassAvg-1.3)*.9);}}
+const dbLin=db=>Math.pow(10,db/20);
 function audioTick(){
-  if(JB){if(hostSpec){let e=0,n=0;for(let i=2;i<=23;i++){e+=Math.max(0,Math.min(1,(hostSpec[i]+100)/70));n++;}bassDetect(e/n);}return;}
+  if(JB){if(hostSpec&&hostSpecBass){hostSpecBass=false;let e=0,n=0;for(let i=2;i<=23;i++){e+=dbLin(hostSpec[i]);n++;}bassDetect(e/n);}return;}
   if(!ac||!N.an) return;
   // auto gain: match the saturated path loudness to the input loudness
   if(autoGain){const ri=rms(N.inA),rw=rms(N.wA);
     if(ri>.002&&rw>.002){const target=Math.max(.3,Math.min(1.6,ri/rw));agG+=(target-agG)*.05;N.ag.gain.setTargetAtTime(agG,ac.currentTime,.05);}}
   // bass detector (35-150 Hz) -> micro recoil + barrel pulse
-  if(fdata){const bh=ac.sampleRate/N.an.fftSize;let e=0,n=0;for(let i=Math.floor(35/bh);i<=Math.ceil(150/bh);i++){e+=fdata[i];n++;}e=e/n/255;bassDetect(e);}
+  if(fdata){const bh=ac.sampleRate/N.an.fftSize;let e=0,n=0;for(let i=Math.floor(35/bh);i<=Math.ceil(150/bh);i++){e+=fdata[i];n++;}e=dbLin(e/n/255*70-100);bassDetect(e);}
 }
 function frame(t){
   shown+=(heat-shown)*.15;
@@ -633,6 +642,7 @@ function frame(t){
 }
 setHeat(0);requestAnimationFrame(frame);
 function applyHost(st,force){
+  if(!force){for(const k of ['heat','mode','mix','autogain','bypass'])if(fresh(k))delete st[k];}
   if(st.mode!=null&&(force||st.mode!==sent.mode)){sent.mode=st.mode;const k=MODE_KEYS[st.mode]||'THERMAL';
     if(k!==mode){const b=[...document.querySelectorAll('.mode')].find(x=>x.dataset.k===k);if(b){const keep=inited;inited=false;b.click();inited=keep;}}}
   if(st.heat!=null&&dragY===null&&!segs.onpointermove&&(force||Math.abs(st.heat-(sent.heat??-1))>.05)){sent.heat=st.heat;const keep=inited;inited=false;setHeat(st.heat/100);inited=keep;}
@@ -642,7 +652,7 @@ function applyHost(st,force){
 }
 if(JB){
   JB.addEventListener('init',st=>{applyHost(st,true);inited=true;});
-  JB.addEventListener('state',st=>{applyHost(st,false);if(st.spec){hostSpec=st.spec;hostSpecNew=true;}});
+  JB.addEventListener('state',st=>{applyHost(st,false);if(st.spec){hostSpec=st.spec;hostSpecNew=true;hostSpecBass=true;}});
   send('ready',{});
 }
 </script>

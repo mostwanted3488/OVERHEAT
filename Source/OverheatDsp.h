@@ -144,7 +144,10 @@ public:
         nch = std::clamp (numChannels, 1, maxCh);
         heat = targetHeat.load();
         mode = std::clamp (targetMode.load(), 0, numModes - 1);
-        rebuildLut();
+        lutHeat = -1.0;
+        fade = 0.0f;
+        rebuildLut (false);
+        spec[0] = modeSpecs[mode].preDb; spec[1] = modeSpecs[mode].midDb; spec[2] = modeSpecs[mode].lpDrop;
         updateFilters();
         msIn = msWet = 0.0;
         agGain = 1.0;
@@ -173,14 +176,29 @@ public:
         {
             mode = m;
             rebuildLut();
-            updateFilters();
         }
+
+        // glide the mode-dependent filter settings too (no jump when switching modes)
+        const auto& M = modeSpecs[mode];
+        const double g = 1.0 - std::exp (-(double) numSamples / (0.04 * sr));
+        const double tgt[3] = { M.preDb, M.midDb, M.lpDrop };
+        bool moving = std::abs (heat - filtHeat) > 1.0e-5;
+        for (int k = 0; k < 3; ++k)
+        {
+            if (std::abs (tgt[k] - spec[k]) > 1.0e-4 * (k == 2 ? 1000.0 : 1.0)) { spec[k] += (tgt[k] - spec[k]) * g; moving = true; }
+            else spec[k] = tgt[k];
+        }
+        if (moving) updateFilters();
     }
 
     // stage 1 (base rate): measure input loudness, pre-emphasis
     void preFilter (float* const* data, int numChannels, int n) noexcept
     {
         const int c0 = std::min (numChannels, nch);
+        // a NaN / inf from the host would poison the filters and the loudness followers for good
+        for (int c = 0; c < c0; ++c)
+            for (int i = 0; i < n; ++i)
+                if (! std::isfinite (data[c][i])) data[c][i] = 0.0f;
         for (int i = 0; i < n; ++i)
         {
             double s = 0.0;
@@ -199,19 +217,38 @@ public:
     // stage 2 (oversampled): the waveshaper
     void shape (float* const* data, int numChannels, int n) noexcept
     {
+        if (fade <= 0.0f)
+        {
+            for (int c = 0; c < numChannels; ++c)
+            {
+                float* x = data[c];
+                for (int i = 0; i < n; ++i)
+                    x[i] = lookup (lut, x[i]);
+            }
+            return;
+        }
+
+        // the curve just changed (mode switch / heat move): crossfade old -> new over this block, no click
+        const float start = fade;
         for (int c = 0; c < numChannels; ++c)
         {
             float* x = data[c];
             for (int i = 0; i < n; ++i)
-                x[i] = lookup (x[i]);
+            {
+                const float w = start * (1.0f - (float) (i + 1) / (float) n);   // weight of the old curve
+                const float a = lookup (lut, x[i]), b = lookup (lutPrev, x[i]);
+                x[i] = a + (b - a) * w;
+            }
         }
+        fade = 0.0f;
     }
 
     // stage 3 (base rate): DC block, darkening low-pass, gain
     void postFilter (float* const* data, int numChannels, int n) noexcept
     {
         const int c0 = std::min (numChannels, nch);
-        const double fixedGain = modeSpecs[mode].gain / (1.0 + heat * 0.35);
+        // auto gain off: fixed make-up so a typical level comes out at the same loudness
+        const double fixedGain = modeSpecs[mode].gain / std::max (0.25, refGain);
         const bool ag = autoGain.load();
 
         for (int i = 0; i < n; ++i)
@@ -245,17 +282,24 @@ public:
 private:
     struct Channel { Biquad pre, mid, dc, lp; };
 
-    float lookup (float x) const noexcept
+    template <typename Table>
+    static float lookup (const Table& t, float x) noexcept
     {
         // same as WebAudio's WaveShaper: input clamped to [-1, 1], linear interpolation
+        if (! (x == x)) x = 0.0f;   // NaN guard: never index the table with garbage
         const float p = (std::clamp (x, -1.0f, 1.0f) + 1.0f) * 0.5f * (float) (lutSize - 1);
         const int i = std::min ((int) p, lutSize - 2);
         const float f = p - (float) i;
-        return lut[(size_t) i] + (lut[(size_t) i + 1] - lut[(size_t) i]) * f;
+        return t[(size_t) i] + (t[(size_t) i + 1] - t[(size_t) i]) * f;
     }
 
-    void rebuildLut()
+    void rebuildLut (bool crossfade = true)
     {
+        if (crossfade && lutHeat >= 0.0)
+        {
+            lutPrev = lut;
+            fade = 1.0f;
+        }
         lutHeat = heat;
         double mx = 1.0e-6;
         std::array<double, lutSize> tmp {};
@@ -270,18 +314,29 @@ private:
         const double norm = mx + std::abs (z);
         for (int i = 0; i < lutSize; ++i)
             lut[(size_t) i] = (float) ((tmp[(size_t) i] - z) / norm);
+
+        // how much the curve changes the level of a typical signal (sine at about -9 dBFS peak)
+        double sIn = 0.0, sOut = 0.0;
+        for (int k = 0; k < 64; ++k)
+        {
+            const float v = 0.35f * (float) std::sin (2.0 * pi * (k + 0.5) / 64.0);
+            const float y = lookup (lut, v);
+            sIn += (double) v * v;
+            sOut += (double) y * y;
+        }
+        refGain = std::sqrt (sOut / std::max (sIn, 1.0e-12));
     }
 
     void updateFilters()
     {
-        const auto& M = modeSpecs[mode];
         const double h = heat;
+        filtHeat = h;
         for (auto& st : ch)
         {
-            st.pre.setHighShelf (sr, 2500.0, h * M.preDb);
-            st.mid.setPeak (sr, 900.0, 0.8, h * M.midDb);
+            st.pre.setHighShelf (sr, 2500.0, h * spec[0]);
+            st.mid.setPeak (sr, 900.0, 0.8, h * spec[1]);
             st.dc.setHighPass (sr, 25.0, 0.7071);
-            st.lp.setLowPass (sr, 19000.0 - h * h * M.lpDrop, 0.7071);
+            st.lp.setLowPass (sr, 19000.0 - h * h * spec[2], 0.7071);
         }
     }
 
@@ -289,7 +344,11 @@ private:
     int nch = 2;
     double heat = 0.0, lutHeat = -1.0;
     int mode = 0;
-    std::array<float, lutSize> lut {};
+    std::array<float, lutSize> lut {}, lutPrev {};
+    float fade = 0.0f;
+    double spec[3] { 0.0, 0.0, 0.0 };   // gliding preDb, midDb, lpDrop
+    double filtHeat = -1.0;
+    double refGain = 1.0;
     std::array<Channel, maxCh> ch {};
     double msIn = 0.0, msWet = 0.0, agGain = 1.0, followCoef = 0.999, glideCoef = 0.999;
 };

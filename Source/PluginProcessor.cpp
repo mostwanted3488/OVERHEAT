@@ -91,12 +91,22 @@ void OverheatAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         return;
 
     const int numCh = juce::jmin (numOut, preparedChannels);
+    if (numCh <= 0)
+        return;
 
     pushParamsToEngine();
     const bool bypass = apvts.getRawParameterValue (ids::bypass)->load() > 0.5f;
     const float mix   = apvts.getRawParameterValue (ids::mix)->load() / 100.0f;
 
     mixer.setWetMixProportion (bypass ? 0.0f : mix);
+
+    // NaN / inf from the host would poison the dry/wet mixer and the filters
+    for (int c = 0; c < numCh; ++c)
+    {
+        auto* d = buffer.getWritePointer (c);
+        for (int i = 0; i < n; ++i)
+            if (! std::isfinite (d[i])) d[i] = 0.0f;
+    }
 
     // work in chunks no larger than what the oversampler / mixer were prepared for
     juce::dsp::AudioBlock<float> whole (buffer.getArrayOfWritePointers(), (size_t) numCh, (size_t) n);
