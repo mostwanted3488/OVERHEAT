@@ -131,7 +131,7 @@ class Engine
 {
 public:
     static constexpr int maxCh = 2;
-    static constexpr int lutSize = 4097;   // odd: x = 0 falls exactly on a point
+    static constexpr int lutSize = 2049;   // odd: x = 0 falls exactly on a point
 
     // written by the processor from the parameters
     std::atomic<float> targetHeat { 0.0f };    // 0..1
@@ -172,7 +172,7 @@ public:
         if (std::abs (th - heat) < 1.0e-4) heat = th;
 
         const int m = std::clamp (targetMode.load(), 0, numModes - 1);
-        if (m != mode || std::abs (heat - lutHeat) > 0.0015)
+        if (m != mode || std::abs (heat - lutHeat) > 0.003)
         {
             mode = m;
             rebuildLut();

@@ -508,6 +508,12 @@ let sparks=[],smoke=[];
 function spark(big){const a=Math.PI+(Math.random()-.5)*(big?.9:1.4);const v=big?6+Math.random()*14:2+Math.random()*6;return {x:MUZ.x,y:MUZ.y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-1,l:1};}
 function puff(){return {x:MUZ.x+Math.random()*60,y:MUZ.y-6,vx:-.2+Math.random()*.3,vy:-.4-Math.random()*.6,r:4+Math.random()*6,l:1};}
 
+/* blurred layers are expensive: render them once per (layer, heat step, mode) and reuse */
+const BP=40, BC={};
+function blurCache(name,src,blur,extra,key=''){
+  let e=BC[name];if(!e){const c=document.createElement('canvas');c.width=Math.ceil(512*S)+BP*2;c.height=Math.ceil(256*S)+BP*2;e=BC[name]={c,x:c.getContext('2d'),k:null};}
+  if(e.k!==String(key)){e.k=String(key);e.x.clearRect(0,0,e.c.width,e.c.height);e.x.filter=`blur(${blur}px)${extra}`;e.x.drawImage(src,0,0,512,256,BP,BP,512*S,256*S);e.x.filter='none';}
+  return e.c;}
 function buildHot(t){
   // tint barrel with thermal colour, spreading from muzzle back toward the receiver
   oc.clearRect(0,0,512,256);oc.globalCompositeOperation='source-over';oc.drawImage(img,0,0);
@@ -543,13 +549,13 @@ function drawGun(t){
   if(!FILTER_OK){ // older macOS WebKit has no canvas filter: same glow via CSS drop-shadows on the canvas
     const acc=ACC[curMode],ga=Math.min(1,shown*1.1*(1+pulse*.7));
     g.style.filter=`drop-shadow(0 0 1.5px rgba(255,255,255,${(.35+pulse*.25).toFixed(2)}))`+(shown>.02?` drop-shadow(0 0 ${(6+shown*12).toFixed(1)}px rgba(${acc},${(ga*.85).toFixed(2)}))`:'')+(cold>0?` drop-shadow(0 0 10px rgba(94,198,255,${(cold*.45).toFixed(2)}))`:'');}
-  if(FILTER_OK&&cold>0){gc.save();gc.filter='blur(12px)';gc.globalAlpha=cold*.22;gc.globalCompositeOperation='lighter';gc.drawImage(sil,0,0,512,256,0,by,512*S,256*S);gc.restore();}
+  if(FILTER_OK&&cold>0){const c=blurCache('cold',sil,12,'');gc.save();gc.globalAlpha=cold*.22;gc.globalCompositeOperation='lighter';gc.drawImage(c,-BP,by-BP);gc.restore();}
   // glow underlay
-  if(FILTER_OK&&shown>.02){gc.save();gc.filter=`blur(${8+shown*14}px)`;gc.globalAlpha=Math.min(1,shown*1.1*(1+pulse*.7));gc.globalCompositeOperation='lighter';
-    gc.drawImage(off,0,0,512,256,0,by,512*S,256*S);gc.restore();}
+  if(FILTER_OK&&shown>.02){const q=Math.round(shown*50)/50,c=blurCache('glow',off,8+q*14,'',curMode+q);gc.save();gc.globalAlpha=Math.min(1,shown*1.1*(1+pulse*.7));gc.globalCompositeOperation='lighter';
+    gc.drawImage(c,-BP,by-BP);gc.restore();}
   // rim light (white outline like the DSR preview)
-  if(FILTER_OK){gc.save();gc.filter='blur(1.5px) brightness(0) invert(1)';gc.globalAlpha=.35+pulse*.25;
-  gc.drawImage(img,0,0,512,256,0,by,512*S,256*S);gc.restore();}
+  if(FILTER_OK){const c=blurCache('rim',img,1.5,' brightness(0) invert(1)');gc.save();gc.globalAlpha=.35+pulse*.25;
+  gc.drawImage(c,-BP,by-BP);gc.restore();}
   // body with shimmer slices
   if(amp<.05){gc.drawImage(off,0,0,512,256,0,by,512*S,256*S);}
   else{
