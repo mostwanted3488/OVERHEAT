@@ -1,0 +1,24 @@
+OVERHEAT — installation sur Windows
+===================================
+
+1. Copier le dossier OVERHEAT.vst3 dans :
+   C:\Program Files\Common Files\VST3\
+
+2. L'interface utilise Microsoft Edge WebView2, déjà installé sur Windows 10 et 11.
+   Si la fenêtre du plugin reste noire, installe le « WebView2 Runtime » (Evergreen) :
+   https://developer.microsoft.com/microsoft-edge/webview2/
+
+3. Dans FL Studio : Options > Manage plugins > Find more plugins (rescan),
+   puis OVERHEAT apparaît dans les effets.
+
+OVERHEAT.exe est la version autonome (pratique pour tester sans FL Studio).
+
+Contrôles
+---------
+- Glisser le DSR-50 vers le haut / le bas, ou cliquer la barre : la chauffe (0-100 %).
+  Molette = réglage, Shift = réglage fin, double-clic = 0.
+- À 100 % : clic sur l'arme = tir.
+- THERMAL / TUBE / TAPE / FUZZ / GRIT : le grain de saturation.
+- MIX : propre / saturé.   AUTO GAIN : garde le même volume perçu.   BYPASS.
+
+Chauffe, mode, mix, auto gain et bypass sont automatisables dans FL Studio.
